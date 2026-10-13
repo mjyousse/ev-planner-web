@@ -15,6 +15,8 @@ export interface PriceInfo {
   sourceName?: string;
   sourceUrl?: string;
   updated?: string;
+  /** When the feed last checked this station (ISO). */
+  checkedAt?: string;
 }
 
 /** Session cost: energy at $/kWh plus per-minute and session fees. */
@@ -174,6 +176,8 @@ export interface FeedStation {
   price_note?: string | null;
   source_url?: string | null;
   verified_on?: string | null;
+  checked_at?: string | null;
+  price_changed_at?: string | null;
 }
 
 export const FEED_URL = 'https://mjyousse.github.io/ev-price-feed/';
@@ -203,8 +207,26 @@ export function feedPriceInfo(f: FeedStation, network: string, teslaMember = fal
     note: useMember ? 'member' : tesla ? 'non-member' : f.price_note ?? undefined,
     memberPrice: f.member_price ?? undefined, perMinute: f.per_minute ?? undefined, sessionFee: f.session_fee ?? undefined,
     idleFee: f.idle_fee ?? undefined, timeOfDay: f.time_of_day?.length ? f.time_of_day : undefined,
-    sourceName: SOURCE_NAMES[f.price_source ?? ''] ?? 'EV Price Feed', sourceUrl: f.source_url ?? undefined, updated: f.verified_on ?? undefined,
+    sourceName: SOURCE_NAMES[f.price_source ?? ''] ?? 'EV Price Feed', sourceUrl: f.source_url ?? undefined, updated: f.price_changed_at ?? f.verified_on ?? undefined, checkedAt: f.checked_at ?? undefined,
   };
+}
+
+let feedGeneratedAt: string | undefined;
+/** When the loaded feed was last rebuilt (newest shard). */
+export const lastFeedGeneratedAt = () => feedGeneratedAt;
+
+const parseWhen = (raw?: string) => {
+  if (!raw) return undefined;
+  const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T12:00:00` : raw);
+  return isNaN(d.getTime()) ? undefined : d;
+};
+export const fmtFeedDate = (raw?: string) => parseWhen(raw)?.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) ?? raw;
+export const fmtFeedTime = (raw?: string) => parseWhen(raw)?.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) ?? raw;
+
+/** "Price updated Oct 10, 2026 · Refreshed Oct 13, 1:04 AM" */
+export function freshnessLine(p: Pick<PriceInfo, 'updated' | 'checkedAt'>): string | undefined {
+  const parts = [p.updated && `Price updated ${fmtFeedDate(p.updated)}`, p.checkedAt && `Refreshed ${fmtFeedTime(p.checkedAt)}`].filter(Boolean);
+  return parts.length ? parts.join(' · ') : undefined;
 }
 
 const shardCache = new Map<string, Promise<Map<number, FeedStation>>>();
@@ -217,7 +239,9 @@ export async function loadFeed(states: string[], fetcher: typeof fetch = fetch, 
       shardCache.set(st, fetcher(`${base}states/${st}.json`).then(async (r) => {
         if (!r.ok) throw new Error(String(r.status));
         const m = new Map<number, FeedStation>();
-        for (const s of ((await r.json()).stations ?? []) as FeedStation[]) if (s.nrel_id != null) m.set(s.nrel_id, s);
+        const body = await r.json();
+        if (body.generated_at && (!feedGeneratedAt || body.generated_at > feedGeneratedAt)) feedGeneratedAt = body.generated_at;
+        for (const s of (body.stations ?? []) as FeedStation[]) if (s.nrel_id != null) m.set(s.nrel_id, s);
         return m;
       }).catch(() => { shardCache.delete(st); return new Map<number, FeedStation>(); }));
     }

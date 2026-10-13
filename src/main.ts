@@ -3,7 +3,7 @@ import './style.css';
 import { EnergyModel, MPH, weatherPercent } from './engine/energy';
 import type { LatLon } from './engine/geo';
 import { plan, type TripPlan } from './engine/planner';
-import { DCFCTrackerProxyPricingProvider, EstimatePricingProvider, FeedPricingProvider, LayeredPricingProvider, ListingPricingProvider, feesText, loadFeed, rateText, type Charger } from './engine/pricing';
+import { DCFCTrackerProxyPricingProvider, EstimatePricingProvider, FeedPricingProvider, LayeredPricingProvider, ListingPricingProvider, feesText, fmtFeedTime, freshnessLine, lastFeedGeneratedAt, loadFeed, rateText, type Charger } from './engine/pricing';
 import { chargePowerKW, type VehicleProfile } from './engine/vehicles';
 import { esc, fmtClock, fmtDuration, fmtF, fmtMi, fmtMoney, fmtMph, fmtPct, fmtWind, mi } from './format';
 import { addElevation } from './services/elevation';
@@ -277,6 +277,7 @@ function renderPlan(p: TripPlan, from: Place, to: Place) {
       <div class="metric"><span>Arrive</span><b>${fmtPct(p.arrivalSoC)}</b></div>
     </div>
     ${wxLine}
+    ${lastFeedGeneratedAt() ? `<div class="addr">Data refreshed ${esc(fmtFeedTime(lastFeedGeneratedAt())!)}</div>` : ''}
     <div class="cta"><a class="primary" id="startTrip" target="_blank" rel="noopener" href="${tripUrl}">Start trip in Google Maps</a></div>
     <p class="poc" style="margin-top:10px">Proof of concept: consumption is modeled, not measured.</p>
   </div><div class="card timeline">`;
@@ -300,7 +301,7 @@ function renderPlan(p: TripPlan, from: Place, to: Place) {
         ${(s.priceInfo?.timeOfDay ?? []).map((w) => `<span class="chip">${esc(w.start)}–${esc(w.end)} ${w.price_per_kwh != null ? `$${w.price_per_kwh.toFixed(2)}` : ''}${w.label ? ' ' + esc(w.label) : ''}</span>`).join('')}
       </div>
       <div class="socbar"><i style="left:${s.arriveSoC}%;width:${s.departSoC - s.arriveSoC}%"></i></div>
-      ${s.priceInfo?.sourceName ? `<div class="addr">Price: ${s.priceInfo.sourceUrl ? `<a href="${esc(s.priceInfo.sourceUrl)}" target="_blank" rel="noopener">${esc(s.priceInfo.sourceName)}</a>` : esc(s.priceInfo.sourceName)}${s.priceInfo.updated ? ` · updated ${esc(s.priceInfo.updated)}` : ''}</div>` : ''}
+      ${s.priceInfo?.sourceName ? `<div class="addr">Price: ${s.priceInfo.sourceUrl ? `<a href="${esc(s.priceInfo.sourceUrl)}" target="_blank" rel="noopener">${esc(s.priceInfo.sourceName)}</a>` : esc(s.priceInfo.sourceName)}</div>` : ''}${s.priceInfo && freshnessLine(s.priceInfo) ? `<div class="addr">${esc(freshnessLine(s.priceInfo)!)}</div>` : ''}
       <div class="addr" style="margin:6px 0">Arrive ${fmtClock(arrive)} · leave ${fmtClock(new Date(clock))}</div>
       <div class="btns">${navButtons(s.charger, s.charger.name)}</div>
     </div></div>`;

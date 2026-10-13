@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { plan } from '../src/engine/planner';
-import { FeedPricingProvider, LayeredPricingProvider, EstimatePricingProvider, feedPriceInfo, isTeslaOnly, loadFeed, sessionCost, type FeedStation } from '../src/engine/pricing';
+import { FeedPricingProvider, LayeredPricingProvider, EstimatePricingProvider, feedPriceInfo, freshnessLine, isTeslaOnly, loadFeed, sessionCost, type FeedStation } from '../src/engine/pricing';
 import { EnergyModel, defaultModelOptions } from '../src/engine/energy';
 import { EV9_GTLINE } from '../src/engine/vehicles';
 import { charger, straightRoute } from './helpers';
@@ -53,5 +53,13 @@ describe('EV Price Feed', () => {
     const p = plan({ route: straightRoute(450), chargers: [cheap, pricey], model: model(), startSoC: 90, targetArrivalSoC: 10, minChargerArrivalSoC: 10 });
     expect(p.stops.some((s) => s.charger.id === cheap.id)).toBe(true);
     expect(p.stops.every((s) => s.priceSource === 'feed')).toBe(true);
+  });
+});
+
+describe('feed freshness', () => {
+  it('builds the price updated / refreshed line', () => {
+    const info = feedPriceInfo({ nrel_id: 1, price_per_kwh: 0.5, price_source: 'dcfctracker', price_changed_at: '2026-10-10', checked_at: '2026-10-13T06:04:00Z' } as any, 'EVgo');
+    expect(freshnessLine(info!)).toMatch(/^Price updated Oct 10, 2026 · Refreshed Oct 13/);
+    expect(freshnessLine({})).toBeUndefined();
   });
 });
