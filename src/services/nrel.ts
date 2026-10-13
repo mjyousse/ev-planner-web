@@ -19,7 +19,7 @@ export function parseStations(json: any): Omit<Charger, 'routeKm' | 'detourKm'>[
       address: [s.street_address, s.city, s.state].filter(Boolean).join(', '),
       lat: s.latitude, lon: s.longitude, dcPorts: s.ev_dc_fast_num ?? 1,
       powerKW: networkPowerKW(network), powerIsEstimated: true,
-      connectors: s.ev_connector_types ?? [], pricingText: s.ev_pricing ?? undefined,
+      connectors: s.ev_connector_types ?? [], pricingText: s.ev_pricing ?? undefined, state: s.state ?? undefined,
     };
   });
 }

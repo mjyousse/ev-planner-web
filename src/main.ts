@@ -3,7 +3,7 @@ import './style.css';
 import { EnergyModel, MPH, weatherPercent } from './engine/energy';
 import type { LatLon } from './engine/geo';
 import { plan, type TripPlan } from './engine/planner';
-import { DCFCTrackerProxyPricingProvider, EstimatePricingProvider, LayeredPricingProvider, ListingPricingProvider, type Charger } from './engine/pricing';
+import { DCFCTrackerProxyPricingProvider, EstimatePricingProvider, FeedPricingProvider, LayeredPricingProvider, ListingPricingProvider, feesText, loadFeed, rateText, type Charger } from './engine/pricing';
 import { chargePowerKW, type VehicleProfile } from './engine/vehicles';
 import { esc, fmtClock, fmtDuration, fmtF, fmtMi, fmtMoney, fmtMph, fmtPct, fmtWind, mi } from './format';
 import { addElevation } from './services/elevation';
@@ -212,8 +212,14 @@ async function runPlan() {
       hasElevation: elev.hasElevation, hasWeather: wx.hasWeather, hasSpeedLimits: lim.hasSpeedLimits,
     };
     setStatus('Finding DC fast chargers…', 'busy');
-    const chargers = await fetchChargers(route, settings.nrelKey || 'DEMO_KEY', settings.corridorMiles);
+    const found = await fetchChargers(route, settings.nrelKey || 'DEMO_KEY', settings.corridorMiles);
+    setStatus('Checking prices…', 'busy');
+    const feed = await loadFeed(found.map((c) => c.state ?? ''));
+    found.forEach((c) => (c.openToNonTesla = feed.get(c.id)?.open_to_non_tesla));
+    // Tesla-only Superchargers can't charge non-Tesla cars, so leave them out.
+    const chargers = found.filter((c) => c.openToNonTesla !== false);
     const pricing = new LayeredPricingProvider([
+      new FeedPricingProvider(feed, settings.teslaMember),
       new DCFCTrackerProxyPricingProvider(settings.dcfcProxyUrl || undefined),
       new ListingPricingProvider(settings.teslaMember),
       new EstimatePricingProvider(settings.teslaMember),
@@ -288,9 +294,13 @@ function renderPlan(p: TripPlan, from: Place, to: Place) {
         <span class="chip soc">${fmtPct(s.arriveSoC)} → ${fmtPct(s.departSoC)}</span>
         <span class="chip">${fmtDuration(s.chargeMinutes)}</span>
         <span class="chip">avg ${Math.round(s.chargeMinutes > 0 ? s.energyKWh / (s.chargeMinutes / 60) : 0)} kW · ${Math.round(s.charger.powerKW)} kW max</span>
-        <span class="chip price">${fmtMoney(s.cost)} · $${s.pricePerKWh.toFixed(2)}/kWh<em>${esc(s.priceNote ?? '')}</em></span>
+        <span class="chip price">${fmtMoney(s.cost)} · ${s.priceInfo ? rateText(s.priceInfo) : `$${s.pricePerKWh.toFixed(2)}/kWh`}<em>${esc(s.priceNote ?? '')}</em></span>
+        ${s.priceInfo?.memberPrice != null ? `<span class="chip">member $${s.priceInfo.memberPrice.toFixed(2)}/kWh</span>` : ''}
+        ${s.priceInfo && feesText(s.priceInfo) ? `<span class="chip">${esc(feesText(s.priceInfo)!)}</span>` : ''}
+        ${(s.priceInfo?.timeOfDay ?? []).map((w) => `<span class="chip">${esc(w.start)}–${esc(w.end)} ${w.price_per_kwh != null ? `$${w.price_per_kwh.toFixed(2)}` : ''}${w.label ? ' ' + esc(w.label) : ''}</span>`).join('')}
       </div>
       <div class="socbar"><i style="left:${s.arriveSoC}%;width:${s.departSoC - s.arriveSoC}%"></i></div>
+      ${s.priceInfo?.sourceName ? `<div class="addr">Price: ${s.priceInfo.sourceUrl ? `<a href="${esc(s.priceInfo.sourceUrl)}" target="_blank" rel="noopener">${esc(s.priceInfo.sourceName)}</a>` : esc(s.priceInfo.sourceName)}${s.priceInfo.updated ? ` · updated ${esc(s.priceInfo.updated)}` : ''}</div>` : ''}
       <div class="addr" style="margin:6px 0">Arrive ${fmtClock(arrive)} · leave ${fmtClock(new Date(clock))}</div>
       <div class="btns">${navButtons(s.charger, s.charger.name)}</div>
     </div></div>`;

@@ -1,7 +1,7 @@
 import { ChargeTable, coldChargeFactor } from './charge';
 import { RouteEnergy, type EnergyModel, type LegWeather } from './energy';
 import { totalKm, type DrivingRoute } from './geo';
-import { isTeslaOnly, networkPricePerKWh, priceNote, type Charger, type PriceSource } from './pricing';
+import { isTeslaOnly, networkPricePerKWh, priceNote, sessionCost, type Charger, type PriceInfo, type PriceSource } from './pricing';
 
 export interface PlannerInput {
   route: DrivingRoute;
@@ -30,6 +30,7 @@ export interface PlannedStop {
   pricePerKWh: number;
   priceSource: PriceSource;
   priceNote?: string;
+  priceInfo?: PriceInfo;
   driveMinutesFromPrevious: number;
   legWeather?: LegWeather;
   legSpeedKmh: number;
@@ -167,7 +168,7 @@ export function plan(input: PlannerInput): TripPlan {
       }
       if (arrive < input.minChargerArrivalSoC - 1e-6) continue;
       const charger = candidates[j - 1];
-      const price = charger.price ?? { perKWh: networkPricePerKWh(charger.network, input.teslaMember), source: 'estimate' as const, note: priceNote(charger.network, input.teslaMember) };
+      const price: PriceInfo = charger.price ?? { perKWh: networkPricePerKWh(charger.network, input.teslaMember), source: 'estimate' as const, note: priceNote(charger.network, input.teslaMember) };
       const scale = model.opts.useWeather ? coldChargeFactor(energy.temperatureAt(toKm)) : 1;
       const t = table(charger.powerKW, scale);
 
@@ -182,13 +183,13 @@ export function plan(input: PlannerInput): TripPlan {
         if (depart < arrive + MIN_CHARGE_PCT) continue;
         const chargeMin = t.minutes(arrive, depart);
         const kWh = ((depart - arrive) / 100) * usable;
-        const money = (kWh / eff) * price.perKWh;
+        const money = sessionCost(price, kWh / eff, chargeMin);
         const stepCost = driveMin * 60 + overhead * 60 + chargeMin * 60 + (money / Math.max(vot, 1)) * 3600;
         relax(keyOf(j, depart), cost + stepCost, depart, {
           from: state,
           stop: {
             charger, routeKm: toKm, arriveSoC: arrive, departSoC: depart, chargeMinutes: chargeMin, energyKWh: kWh, cost: money,
-            pricePerKWh: price.perKWh, priceSource: price.source, priceNote: price.note, driveMinutesFromPrevious: driveMin, legSpeedKmh: 0,
+            pricePerKWh: price.perKWh, priceSource: price.source, priceNote: price.note, priceInfo: price, driveMinutesFromPrevious: driveMin, legSpeedKmh: 0,
           },
         });
       }
