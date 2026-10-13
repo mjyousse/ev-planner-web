@@ -418,3 +418,8 @@ updateLabel();
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 if (new URLSearchParams(location.search).has('demo')) runPlan();
+
+
+declare const __APP_VERSION__: string;
+const versionEl = document.getElementById('appVersion');
+if (versionEl) versionEl.textContent = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '';
