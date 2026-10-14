@@ -10,7 +10,8 @@ import { addElevation } from './services/elevation';
 import { searchPlaces, type Place } from './services/geocode';
 import { appleMapsUrl, googleMapsUrl, googleTripUrl } from './services/links';
 import { fetchChargers } from './services/nrel';
-import { fetchRoutes, type RouteCandidate } from './services/routing';
+import { fetchRoutesCached, usingMapbox, type RouteCandidate } from './services/routing';
+import { CONGESTION_COLOR, laneArrow, mapboxStyleUrl, mapboxTransformUrl, trafficDelayMinutes, type Congestion } from './services/mapbox';
 import { addRecent, decodeTrip, elevationPath, encodeTrip, KNOWN_NETWORKS, planWithFilters, type SavedPlace, type TripSpec } from './engine/options';
 import { stopPenaltyMinutes, stopsLabel, arrivalBand, arrivalRange, costLines, fmtEfficiency, fmtTemp, nextEfficiency, pickRoute, PREFERENCES, rangeText, EFFICIENCY_UNITS, EFFICIENCY_LABEL, type RouteSummary } from './engine/insights';
 import { addSpeedLimits } from './services/speedlimits';
@@ -31,14 +32,17 @@ const places: { from?: Place; to?: Place } = {
 
 // ---------- Map ----------
 const dark = matchMedia('(prefers-color-scheme: dark)');
-const styleUrl = () => `https://tiles.openfreemap.org/styles/${dark.matches ? 'dark' : 'liberty'}`;
-const map: MLMap = new maplibregl.Map({ container: 'map', style: styleUrl(), center: [-97.3, 31.5], zoom: 6, attributionControl: { compact: true } });
+const styleUrl = () => (usingMapbox() ? mapboxStyleUrl(dark.matches) : `https://tiles.openfreemap.org/styles/${dark.matches ? 'dark' : 'liberty'}`);
+const map: MLMap = new maplibregl.Map({
+  container: 'map', style: styleUrl(), center: [-97.3, 31.5], zoom: 6, attributionControl: { compact: true },
+  transformRequest: (url) => ({ url: mapboxTransformUrl(url) }),
+});
 map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
 map.addControl(new maplibregl.GeolocateControl({ positionOptions: { enableHighAccuracy: false } }), 'top-right');
 let markers: Marker[] = [];
 let lastPlan: TripPlan | undefined;
 let lastChargers: Charger[] = [];
-interface RouteOption { index: number; name: string; plan: TripPlan; chargers: Charger[]; notes: string[] }
+interface RouteOption { index: number; name: string; plan: TripPlan; chargers: Charger[]; notes: string[]; cand: RouteCandidate }
 let routeOptions: RouteOption[] = [];
 let selectedRoute = 0;
 let lastPlaces: { from: Place; to: Place } | undefined;
@@ -83,7 +87,9 @@ function rampColor(t: number): string {
 function drawPlan(p: TripPlan) {
   if (!map.isStyleLoaded() || !map.getSource('route')) return;
   const pts = p.energy.route.points;
-  const byConsumption = settings.colorBy === 'consumption';
+  const runs = routeOptions.find((o) => o.index === selectedRoute)?.cand.traffic;
+  const byTraffic = settings.colorBy === 'traffic' && !!runs;
+  const byConsumption = settings.colorBy === 'consumption' || (settings.colorBy === 'traffic' && !runs);
   const vals = byConsumption ? p.energy.segWhPerKm : p.energy.segSpeedKmh;
   const sorted = [...vals].sort((a, b) => a - b);
   const lo = sorted[Math.floor(sorted.length * 0.05)] ?? 0, hi = sorted[Math.floor(sorted.length * 0.95)] ?? 1;
@@ -94,6 +100,10 @@ function drawPlan(p: TripPlan) {
     const v = vals.slice(i, j).reduce((a, b) => a + b, 0) / Math.max(1, j - i);
     features.push({ type: 'Feature', properties: { color: rampColor((v - lo) / Math.max(hi - lo, 1e-6)) },
       geometry: { type: 'LineString', coordinates: pts.slice(i, j + 1).map((q) => [q.lon, q.lat]) } });
+  }
+  if (byTraffic) {
+    features.length = 0;
+    for (const r of runs!) features.push({ type: 'Feature', properties: { color: CONGESTION_COLOR[r.level] }, geometry: { type: 'LineString', coordinates: r.coords } });
   }
   (map.getSource('route') as GeoJSONSource).setData({ type: 'FeatureCollection', features });
   (map.getSource('chargers') as GeoJSONSource).setData({ type: 'FeatureCollection', features: lastChargers.map((c) => ({
@@ -116,7 +126,8 @@ function drawPlan(p: TripPlan) {
 
   const unit = byConsumption ? 'Wh/mi' : 'mph';
   const conv = (v: number) => Math.round(byConsumption ? v * 1.609344 : mi(v));
-  legend.innerHTML = `<b>${byConsumption ? 'Consumption' : 'Driving speed'}</b><div class="ramp" style="background:linear-gradient(90deg,${[0, 0.33, 0.66, 1].map(rampColor).join(',')})"></div><div class="ends"><span>${conv(lo)}</span><span>${conv(hi)} ${unit}</span></div>`;
+  if (byTraffic) legend.innerHTML = `<b>Live traffic</b><div class="ends">${(['low', 'moderate', 'heavy', 'severe'] as Congestion[]).map((l) => `<span><i style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${CONGESTION_COLOR[l]}"></i> ${l}</span>`).join('')}</div>`;
+  else legend.innerHTML = `<b>${byConsumption ? 'Consumption' : 'Driving speed'}</b><div class="ramp" style="background:linear-gradient(90deg,${[0, 0.33, 0.66, 1].map(rampColor).join(',')})"></div><div class="ends"><span>${conv(lo)}</span><span>${conv(hi)} ${unit}</span></div>`;
   legend.style.display = 'block';
 
   const b = new maplibregl.LngLatBounds();
@@ -210,14 +221,14 @@ async function runPlan() {
     setStatus('Finding places…', 'busy');
     const [from, to] = await Promise.all([resolve('from'), resolve('to')]);
     setStatus('Routing…', 'busy');
-    const candidates = (await fetchRoutes(from, to)).slice(0, 3);
+    const candidates = (await fetchRoutesCached(from, to)).slice(0, 3);
     const options: RouteOption[] = [];
     let firstError: unknown;
     let notes: string[] = [];
     for (const [i, cand] of candidates.entries()) {
       try {
         const r = await planRoute(cand, candidates.length > 1 ? ` (route ${i + 1} of ${candidates.length})` : '');
-        options.push({ index: i, name: cand.name, plan: r.plan, chargers: r.chargers, notes: r.filterNotes });
+        options.push({ index: i, name: cand.name, plan: r.plan, chargers: r.chargers, notes: r.filterNotes, cand });
         if (i === 0) notes = r.notes;
       } catch (e) { firstError ??= e; }
     }
@@ -321,7 +332,9 @@ function renderPlan(p: TripPlan, from: Place, to: Place) {
     ${routeOptions.length > 1 ? `<div class="routes">${routeOptions.map((o) => { const r = summaryOf(o); return `<label class="toggle" style="cursor:pointer"><div>${o.name ? 'via ' + esc(o.name) : 'Route ' + (o.index + 1)}<small>${fmtDuration(r.totalMinutes)} · ${dist(r.km)} · ${fmtMoney(r.cost)} · ${Math.round(r.energyKWh)} kWh · arrive ${fmtPct(r.arrivalSoC)}</small></div><input type="radio" name="route" data-route="${o.index}" ${o.index === selectedRoute ? 'checked' : ''}></label>`; }).join('')}</div>` : ''}
     ${showCost ? `<div class="costinfo"><p class="muted small">Each stop's cost is the energy the charger delivers times its price. About 8% is lost as heat, so you pay for a little more than the battery gains. Some networks add session or per-minute fees.</p>${p.stops.map((s, i) => `<div><b>${i + 1}. ${esc(s.charger.name)}</b>${costLines(s.energyKWh, 0.92, s.pricePerKWh, s.cost).map((l) => `<div class="addr">${esc(l)}</div>`).join('')}</div>`).join('') || '<div class="addr">No charging needed.</div>'}</div>` : ''}
     ${(routeOptions.find((o) => o.index === selectedRoute)?.notes ?? []).map((n) => `<div class="status error">${esc(n)}</div>`).join('')}
+    ${trafficLine()}
     ${elevationSvg(p)}
+    ${directionsHtml()}
     <div class="btns" style="margin-top:8px"><button class="ghost" id="shareTrip">Copy share link</button><button class="ghost" id="saveTrip">Save trip</button></div>
     <p class="muted small">Arrive shows the spread across routes, or ±10% energy with one route. OSRM routing has no live traffic.</p>
     ${wxLine}
@@ -379,6 +392,23 @@ function renderPlan(p: TripPlan, from: Place, to: Place) {
     renderPlaces();
     setStatus('Trip saved in this browser.');
   });
+}
+
+function trafficLine(): string {
+  const c = routeOptions.find((o) => o.index === selectedRoute)?.cand;
+  if (!c?.trafficMinutes) return '';
+  const delay = trafficDelayMinutes(c);
+  return `<div class="addr">🚦 Drive time with current traffic ${fmtDuration(c.trafficMinutes)}${delay != null && delay >= 1 ? ` · ${fmtDuration(delay)} slower than usual` : delay != null ? ' · traffic is normal' : ''}</div>`;
+}
+
+function directionsHtml(): string {
+  const steps = routeOptions.find((o) => o.index === selectedRoute)?.cand.steps;
+  if (!steps?.length) return '';
+  const lanes = (st: (typeof steps)[number]) => st.lanes.length
+    ? `<span class="lanes">${st.lanes.map((l) => `<b class="${l.active ? 'on' : ''}">${laneArrow(l)}</b>`).join('')}</span>` : '';
+  return `<details class="steps"><summary>Turn-by-turn directions (${steps.length} steps)</summary><ol>${steps.map((st) =>
+    `<li>${lanes(st)}<span>${esc(st.instruction)}</span>${st.distanceM > 0 ? `<small>${dist(st.distanceM / 1000)}</small>` : ''}</li>`).join('')}</ol>
+    <p class="muted small">Directions and traffic by Mapbox. Charging stops aren't included in these steps; use Google or Apple Maps to drive the full trip.</p></details>`;
 }
 
 function elevationSvg(p: TripPlan): string {
@@ -547,7 +577,7 @@ function renderSettings() {
       </div>
     </div>
     <div class="card settings"><h3>Map &amp; navigation</h3>
-      <label class="field"><span>Color route by</span><select data-s="colorBy"><option value="consumption" ${s.colorBy === 'consumption' ? 'selected' : ''}>Consumption</option><option value="speed" ${s.colorBy === 'speed' ? 'selected' : ''}>Speed</option></select></label>
+      <label class="field"><span>Color route by</span><select data-s="colorBy"><option value="consumption" ${s.colorBy === 'consumption' ? 'selected' : ''}>Consumption</option><option value="speed" ${s.colorBy === 'speed' ? 'selected' : ''}>Speed</option><option value="traffic" ${s.colorBy === 'traffic' ? 'selected' : ''}>Live traffic</option></select></label>
       <label class="field"><span>Navigate with</span><select data-s="navApp"><option value="ask" ${s.navApp === 'ask' ? 'selected' : ''}>Show both</option><option value="apple" ${s.navApp === 'apple' ? 'selected' : ''}>Apple Maps</option><option value="google" ${s.navApp === 'google' ? 'selected' : ''}>Google Maps</option></select></label>
     </div>
     <div class="card settings"><h3>NREL API key</h3>

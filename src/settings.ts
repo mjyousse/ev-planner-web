@@ -23,7 +23,7 @@ export interface Settings {
   /** 0 = off. */
   minKW: number;
   corridorMiles: number;
-  colorBy: 'consumption' | 'speed';
+  colorBy: 'consumption' | 'speed' | 'traffic';
   navApp: 'ask' | 'apple' | 'google';
   dcfcProxyUrl: string;
   vehicleId: string;
@@ -32,7 +32,7 @@ export interface Settings {
 export const DEFAULTS: Settings = {
   nrelKey: 'DEMO_KEY', teslaMember: false, useWeather: true, useSpeedLimits: true, useElevation: true,
   referenceSpeedMph: 62, maxSpeedMph: 80, speedFactor: 1, correction: 1, preference: 'fastest', useMiles: true, temperatureUnit: 'F', efficiencyUnit: 'miPerKWh', stopsBias: 0.75, networks: [], maxPricePerKWh: 0, minKW: 0, corridorMiles: 2,
-  colorBy: 'consumption', navApp: 'ask', dcfcProxyUrl: '', vehicleId: EV9_GTLINE.id,
+  colorBy: 'traffic', navApp: 'ask', dcfcProxyUrl: '', vehicleId: EV9_GTLINE.id,
 };
 
 const KEY = 'evp.settings.v1';

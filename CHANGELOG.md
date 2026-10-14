@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0 — 2026-10-13
+
+- Routing uses Mapbox Directions (driving-traffic) when a Mapbox token is configured, with OSRM as the fallback.
+- Live traffic: route colored by congestion (new default "Live traffic" option) and drive time with current traffic versus a typical day.
+- Turn-by-turn step list with lane guidance for the selected route.
+- Map uses Mapbox Streets/Dark styles with Mapbox routing, as Mapbox's terms require.
+- Routes are cached for 5 minutes so live re-plans after a settings or battery change don't spend extra API calls.
+
 ## 0.3.0 — 2026-10-13
 
 - Stops slider from Fewest stops to Fastest arrival, plus Most efficient. Cheapest and Balanced are gone; old settings fall back to Fastest.

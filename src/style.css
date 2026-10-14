@@ -112,3 +112,11 @@ h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: v
 #places { margin: 6px 0; }
 #places button.small { margin: 2px 4px 2px 0; }
 .elev { margin-top: 10px; }
+.steps { margin-top: 10px; }
+.steps summary { cursor: pointer; font-weight: 600; }
+.steps ol { padding-left: 18px; margin: 8px 0; }
+.steps li { margin: 6px 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.steps li small { opacity: .6; margin-left: auto; }
+.lanes { display: inline-flex; gap: 2px; }
+.lanes b { font-weight: 400; padding: 0 4px; border: 1px solid rgba(127,127,127,.35); border-radius: 4px; opacity: .45; }
+.lanes b.on { opacity: 1; border-color: currentColor; }

@@ -42,6 +42,9 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+        env:
+          # Public (pk) token, URL-restricted in the Mapbox account. Without it the app falls back to OSRM.
+          VITE_MAPBOX_TOKEN: ${{ secrets.MAPBOX_PUBLIC_TOKEN }}
 
       - uses: actions/upload-pages-artifact@v3
         with:

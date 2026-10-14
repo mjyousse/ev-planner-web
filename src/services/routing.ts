@@ -1,4 +1,5 @@
 import { routeFromCoordinates, type DrivingRoute, type LatLon } from '../engine/geo';
+import { directionsUrl, MAPBOX_TOKEN, parseMapboxRoutes, type RouteStep, type TrafficRun } from './mapbox';
 
 const OSRM = 'https://router.project-osrm.org/route/v1/driving/';
 
@@ -14,7 +15,40 @@ export async function fetchRoute(from: LatLon, to: LatLon, signal?: AbortSignal)
   return routeFromCoordinates(coords, route.duration, 1);
 }
 
-export interface RouteCandidate { route: DrivingRoute; name: string }
+export interface RouteCandidate {
+  route: DrivingRoute;
+  name: string;
+  steps?: RouteStep[];
+  /** Drive time with current traffic (Mapbox only). */
+  trafficMinutes?: number;
+  /** Drive time on a typical day (Mapbox only). */
+  typicalMinutes?: number;
+  traffic?: TrafficRun[];
+}
+
+// Routes are reused for a few minutes so replanning after a settings change doesn't spend another API call.
+const cache = new Map<string, { at: number; routes: RouteCandidate[] }>();
+const CACHE_MS = 5 * 60_000;
+export const routeCacheKey = (from: LatLon, to: LatLon, provider: string) =>
+  `${provider}:${from.lat.toFixed(4)},${from.lon.toFixed(4)}>${to.lat.toFixed(4)},${to.lon.toFixed(4)}`;
+export const usingMapbox = () => !!MAPBOX_TOKEN;
+
+/** Mapbox driving-traffic when a token is configured, otherwise OSRM. */
+export async function fetchRoutesCached(from: LatLon, to: LatLon, signal?: AbortSignal, now = Date.now()): Promise<RouteCandidate[]> {
+  const key = routeCacheKey(from, to, usingMapbox() ? 'mapbox' : 'osrm');
+  const hit = cache.get(key);
+  if (hit && now - hit.at < CACHE_MS) return hit.routes;
+  let routes: RouteCandidate[] = [];
+  if (usingMapbox()) {
+    try {
+      const r = await fetch(directionsUrl(from, to, MAPBOX_TOKEN), { signal });
+      if (r.ok) routes = parseMapboxRoutes(await r.json());
+    } catch (e) { if ((e as Error).name === 'AbortError') throw e; }
+  }
+  if (!routes.length) routes = await fetchRoutes(from, to, signal);
+  cache.set(key, { at: now, routes });
+  return routes;
+}
 
 /** Main route plus up to two OSRM alternatives. */
 export async function fetchRoutes(from: LatLon, to: LatLon, signal?: AbortSignal): Promise<RouteCandidate[]> {
