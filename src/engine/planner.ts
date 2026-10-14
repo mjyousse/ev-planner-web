@@ -13,6 +13,8 @@ export interface PlannerInput {
   /** $/hour you'd pay to save time. Higher favours speed over price. */
   valueOfTimePerHour?: number;
   stopOverheadMinutes?: number;
+  /** Extra minutes counted against each stop when choosing (not shown as time). Higher = fewer, longer stops. */
+  stopPenaltyMinutes?: number;
   socStep?: number;
   maxChargeSoC?: number;
   chargingEfficiency?: number;
@@ -104,6 +106,7 @@ class MinHeap<T> {
 export function plan(input: PlannerInput): TripPlan {
   const vot = input.valueOfTimePerHour ?? 25;
   const overhead = input.stopOverheadMinutes ?? 4;
+  const penalty = input.stopPenaltyMinutes ?? 0;
   const socStep = input.socStep ?? 5;
   const maxSoC = input.maxChargeSoC ?? 100;
   const eff = input.chargingEfficiency ?? 0.92;
@@ -184,7 +187,7 @@ export function plan(input: PlannerInput): TripPlan {
         const chargeMin = t.minutes(arrive, depart);
         const kWh = ((depart - arrive) / 100) * usable;
         const money = sessionCost(price, kWh / eff, chargeMin);
-        const stepCost = driveMin * 60 + overhead * 60 + chargeMin * 60 + (money / Math.max(vot, 1)) * 3600;
+        const stepCost = driveMin * 60 + (overhead + penalty) * 60 + chargeMin * 60 + (money / Math.max(vot, 1)) * 3600;
         relax(keyOf(j, depart), cost + stepCost, depart, {
           from: state,
           stop: {

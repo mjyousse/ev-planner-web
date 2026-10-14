@@ -1,6 +1,6 @@
 {
   "name": "ev-planner-web",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "EV road-trip planner for the browser",
   "scripts": {
     "dev": "vite",

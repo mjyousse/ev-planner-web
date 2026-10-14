@@ -4,14 +4,15 @@ import { EnergyModel, MPH, weatherPercent } from './engine/energy';
 import type { LatLon } from './engine/geo';
 import { plan, type TripPlan } from './engine/planner';
 import { DCFCTrackerProxyPricingProvider, EstimatePricingProvider, FeedPricingProvider, LayeredPricingProvider, ListingPricingProvider, feesText, fmtFeedTime, freshnessLine, lastFeedGeneratedAt, loadFeed, rateText, type Charger } from './engine/pricing';
-import { chargePowerKW, type VehicleProfile } from './engine/vehicles';
+import { capacityText, chargePowerKW, type VehicleProfile } from './engine/vehicles';
 import { esc, fmtClock, fmtDuration, fmtMi, fmtMoney, fmtMph, fmtPct, fmtWind, mi } from './format';
 import { addElevation } from './services/elevation';
 import { searchPlaces, type Place } from './services/geocode';
 import { appleMapsUrl, googleMapsUrl, googleTripUrl } from './services/links';
 import { fetchChargers } from './services/nrel';
 import { fetchRoutes, type RouteCandidate } from './services/routing';
-import { arrivalBand, arrivalRange, costLines, fmtEfficiency, fmtTemp, nextEfficiency, pickRoute, PREFERENCES, rangeText, EFFICIENCY_UNITS, EFFICIENCY_LABEL, type RouteSummary } from './engine/insights';
+import { addRecent, decodeTrip, elevationPath, encodeTrip, KNOWN_NETWORKS, planWithFilters, type SavedPlace, type TripSpec } from './engine/options';
+import { stopPenaltyMinutes, stopsLabel, arrivalBand, arrivalRange, costLines, fmtEfficiency, fmtTemp, nextEfficiency, pickRoute, PREFERENCES, rangeText, EFFICIENCY_UNITS, EFFICIENCY_LABEL, type RouteSummary } from './engine/insights';
 import { addSpeedLimits } from './services/speedlimits';
 import { addWeather } from './services/weather';
 import { DEFAULTS, loadSettings, loadVehicles, saveSettings, saveVehicles, type Settings } from './settings';
@@ -37,7 +38,7 @@ map.addControl(new maplibregl.GeolocateControl({ positionOptions: { enableHighAc
 let markers: Marker[] = [];
 let lastPlan: TripPlan | undefined;
 let lastChargers: Charger[] = [];
-interface RouteOption { index: number; name: string; plan: TripPlan; chargers: Charger[] }
+interface RouteOption { index: number; name: string; plan: TripPlan; chargers: Charger[]; notes: string[] }
 let routeOptions: RouteOption[] = [];
 let selectedRoute = 0;
 let lastPlaces: { from: Place; to: Place } | undefined;
@@ -216,14 +217,15 @@ async function runPlan() {
     for (const [i, cand] of candidates.entries()) {
       try {
         const r = await planRoute(cand, candidates.length > 1 ? ` (route ${i + 1} of ${candidates.length})` : '');
-        options.push({ index: i, name: cand.name, plan: r.plan, chargers: r.chargers });
+        options.push({ index: i, name: cand.name, plan: r.plan, chargers: r.chargers, notes: r.filterNotes });
         if (i === 0) notes = r.notes;
       } catch (e) { firstError ??= e; }
     }
     if (!options.length) throw firstError ?? new Error('Could not plan this trip.');
     routeOptions = options;
     lastPlaces = { from, to };
-    const best = pickRoute(options.map(summaryOf), settings.preference)?.index ?? options[0].index;
+    recordRecent(to);
+    const best = pickRoute(options.map(summaryOf), settings.preference, stopPenaltyMinutes(settings.stopsBias))?.index ?? options[0].index;
     setStatus(notes.length ? `Planned without ${notes.join(', ')} (service unavailable).` : `${options.length} route${options.length > 1 ? 's' : ''} planned.`);
     selectRoute(best);
     document.body.dataset.planned = '1';
@@ -235,7 +237,7 @@ async function runPlan() {
 }
 $('#planBtn').addEventListener('click', runPlan);
 
-async function planRoute(cand: RouteCandidate, label: string): Promise<{ plan: TripPlan; chargers: Charger[]; notes: string[] }> {
+async function planRoute(cand: RouteCandidate, label: string): Promise<{ plan: TripPlan; chargers: Charger[]; notes: string[]; filterNotes: string[] }> {
   let route = cand.route;
   setStatus(`Adding terrain, weather and speed limits${label}…`, 'busy');
   const [elev, wx, lim] = await Promise.all([
@@ -265,12 +267,14 @@ async function planRoute(cand: RouteCandidate, label: string): Promise<{ plan: T
   chargers.forEach((c) => (c.price = prices.get(c.id)));
   setStatus(`Planning stops${label}…`, 'busy');
   await new Promise((r) => setTimeout(r, 0));
-  const p = plan({
+  const filtered = planWithFilters({
     route, chargers, model: model(), startSoC: num('startSoC'), targetArrivalSoC: num('arriveSoC'), minChargerArrivalSoC: num('minSoC'),
     valueOfTimePerHour: PREFERENCES[settings.preference].valueOfTime, teslaMember: settings.teslaMember,
-  });
+    stopPenaltyMinutes: stopPenaltyMinutes(settings.stopsBias),
+  }, { networks: settings.networks, maxPricePerKWh: settings.maxPricePerKWh || undefined, minKW: settings.minKW || undefined });
+  const p = filtered.plan;
   const notes = [!route.hasWeather && settings.useWeather ? 'weather' : '', !route.hasSpeedLimits && settings.useSpeedLimits ? 'speed limits' : '', !route.hasElevation && settings.useElevation ? 'elevation' : ''].filter(Boolean);
-  return { plan: p, chargers, notes };
+  return { plan: p, chargers, notes, filterNotes: filtered.notes };
 }
 
 function selectRoute(index: number) {
@@ -316,6 +320,9 @@ function renderPlan(p: TripPlan, from: Place, to: Place) {
     </div>
     ${routeOptions.length > 1 ? `<div class="routes">${routeOptions.map((o) => { const r = summaryOf(o); return `<label class="toggle" style="cursor:pointer"><div>${o.name ? 'via ' + esc(o.name) : 'Route ' + (o.index + 1)}<small>${fmtDuration(r.totalMinutes)} · ${dist(r.km)} · ${fmtMoney(r.cost)} · ${Math.round(r.energyKWh)} kWh · arrive ${fmtPct(r.arrivalSoC)}</small></div><input type="radio" name="route" data-route="${o.index}" ${o.index === selectedRoute ? 'checked' : ''}></label>`; }).join('')}</div>` : ''}
     ${showCost ? `<div class="costinfo"><p class="muted small">Each stop's cost is the energy the charger delivers times its price. About 8% is lost as heat, so you pay for a little more than the battery gains. Some networks add session or per-minute fees.</p>${p.stops.map((s, i) => `<div><b>${i + 1}. ${esc(s.charger.name)}</b>${costLines(s.energyKWh, 0.92, s.pricePerKWh, s.cost).map((l) => `<div class="addr">${esc(l)}</div>`).join('')}</div>`).join('') || '<div class="addr">No charging needed.</div>'}</div>` : ''}
+    ${(routeOptions.find((o) => o.index === selectedRoute)?.notes ?? []).map((n) => `<div class="status error">${esc(n)}</div>`).join('')}
+    ${elevationSvg(p)}
+    <div class="btns" style="margin-top:8px"><button class="ghost" id="shareTrip">Copy share link</button><button class="ghost" id="saveTrip">Save trip</button></div>
     <p class="muted small">Arrive shows the spread across routes, or ±10% energy with one route. OSRM routing has no live traffic.</p>
     ${wxLine}
     ${lastFeedGeneratedAt() ? `<div class="addr">Data refreshed ${esc(fmtFeedTime(lastFeedGeneratedAt())!)}</div>` : ''}
@@ -357,7 +364,97 @@ function renderPlan(p: TripPlan, from: Place, to: Place) {
   $('#effMetric')?.addEventListener('click', () => { settings.efficiencyUnit = nextEfficiency(settings.efficiencyUnit); saveSettings(settings); rerender(); });
   $('#costMetric')?.addEventListener('click', () => { showCost = !showCost; rerender(); });
   $$<HTMLInputElement>('[data-route]').forEach((el) => el.addEventListener('change', () => selectRoute(Number(el.dataset.route))));
+  $('#shareTrip')?.addEventListener('click', async () => {
+    const t = currentTrip();
+    if (!t) return;
+    const url = `${location.origin}${location.pathname}#${encodeTrip(t)}`;
+    history.replaceState(null, '', `#${encodeTrip(t)}`);
+    try { await navigator.clipboard.writeText(url); setStatus('Share link copied.'); } catch { setStatus(url); }
+  });
+  $('#saveTrip')?.addEventListener('click', () => {
+    const t = currentTrip();
+    if (!t) return;
+    savedTrips = [t, ...savedTrips.filter((x) => encodeTrip(x) !== encodeTrip(t))].slice(0, 20);
+    localStorage.setItem('evp.trips.v1', JSON.stringify(savedTrips));
+    renderPlaces();
+    setStatus('Trip saved in this browser.');
+  });
 }
+
+function elevationSvg(p: TripPlan): string {
+  const r = p.energy.route;
+  if (!r.hasElevation) return '';
+  const W = 340, H = 60;
+  const e = elevationPath(r.points, W, H);
+  if (!e) return '';
+  const ft = (m: number) => (settings.useMiles ? `${Math.round(m * 3.28084)} ft` : `${Math.round(m)} m`);
+  return `<div class="elev"><div class="addr">Elevation ${ft(e.minM)} – ${ft(e.maxM)}</div><svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none"><path d="${e.d}L${W},${H}L0,${H}Z" fill="currentColor" opacity=".15"/><path d="${e.d}" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".7"/></svg></div>`;
+}
+
+// ---------- Saved places, recent searches, saved trips, share links ----------
+const loadJSON = <T,>(k: string, d: T): T => { try { return JSON.parse(localStorage.getItem(k) ?? '') ?? d; } catch { return d; } };
+let savedPlaces: { home?: SavedPlace; work?: SavedPlace } = loadJSON('evp.places.v1', {});
+let recents: SavedPlace[] = loadJSON('evp.recents.v1', []);
+let savedTrips: TripSpec[] = loadJSON('evp.trips.v1', []);
+
+function recordRecent(p: Place) {
+  recents = addRecent({ name: p.name, detail: p.detail, lat: p.lat, lon: p.lon }, recents);
+  localStorage.setItem('evp.recents.v1', JSON.stringify(recents));
+  renderPlaces();
+}
+
+function currentTrip(): TripSpec | undefined {
+  if (!lastPlaces) return undefined;
+  const sp = (p: Place): SavedPlace => ({ name: p.name, detail: p.detail, lat: p.lat, lon: p.lon });
+  return { from: sp(lastPlaces.from), to: sp(lastPlaces.to), startSoC: num('startSoC'), arriveSoC: num('arriveSoC'), minSoC: num('minSoC'), vehicleId: settings.vehicleId };
+}
+
+function setPlace(which: 'from' | 'to', p: SavedPlace) {
+  places[which] = { name: p.name, detail: p.detail, lat: p.lat, lon: p.lon } as Place;
+  ($(`#${which}`) as HTMLInputElement).value = [p.name, p.detail.split(',')[0]].filter(Boolean).join(', ');
+}
+
+function loadTrip(t: TripSpec) {
+  setPlace('from', t.from); setPlace('to', t.to);
+  ($('#startSoC') as HTMLInputElement).value = String(t.startSoC);
+  ($('#arriveSoC') as HTMLInputElement).value = String(t.arriveSoC);
+  ($('#minSoC') as HTMLInputElement).value = String(t.minSoC);
+  if (t.vehicleId && vehicles.some((v) => v.id === t.vehicleId)) { settings.vehicleId = t.vehicleId; saveSettings(settings); updateLabel(); }
+  runPlan();
+}
+
+function renderPlaces() {
+  const el = $('#places');
+  if (!el) return;
+  const chip = (label: string, p?: SavedPlace, slot?: string) => p
+    ? `<button class="ghost" data-go="${slot}">${label}</button>`
+    : `<button class="ghost" data-save="${slot}" title="Save the current To as ${label}">Set ${label}</button>`;
+  el.innerHTML = `<div class="btns">${chip('🏠 Home', savedPlaces.home, 'home')}${chip('💼 Work', savedPlaces.work, 'work')}
+      ${places.to ? `<button class="ghost" data-save="home">To → Home</button><button class="ghost" data-save="work">To → Work</button>` : ''}</div>
+    ${recents.length ? `<div class="addr" style="margin-top:8px">Recent <a href="#" id="clearRecents">clear</a></div>${recents.map((p, i) => `<button class="ghost small" data-recent="${i}">${esc(p.name)}</button>`).join('')}` : ''}
+    ${savedTrips.length ? `<div class="addr" style="margin-top:8px">Saved trips</div>${savedTrips.map((t, i) => `<div class="btns"><button class="ghost small" data-trip="${i}">${esc(t.from.name)} → ${esc(t.to.name)}</button><button class="ghost small" data-deltrip="${i}" title="Delete">✕</button></div>`).join('')}` : ''}`;
+  $$('[data-go]', el).forEach((b) => b.addEventListener('click', () => { const p = savedPlaces[b.dataset.go as 'home' | 'work']; if (p) { setPlace('to', p); runPlan(); } }));
+  $$('[data-save]', el).forEach((b) => b.addEventListener('click', () => {
+    const p = places.to;
+    if (!p) { setStatus('Pick a destination in To first.'); return; }
+    savedPlaces[b.dataset.save as 'home' | 'work'] = { name: b.dataset.save === 'home' ? 'Home' : 'Work', detail: [p.name, p.detail].filter(Boolean).join(', '), lat: p.lat, lon: p.lon };
+    localStorage.setItem('evp.places.v1', JSON.stringify(savedPlaces));
+    renderPlaces();
+  }));
+  $$('[data-recent]', el).forEach((b) => b.addEventListener('click', () => { setPlace('to', recents[+b.dataset.recent!]); runPlan(); }));
+  $$('[data-trip]', el).forEach((b) => b.addEventListener('click', () => loadTrip(savedTrips[+b.dataset.trip!])));
+  $$('[data-deltrip]', el).forEach((b) => b.addEventListener('click', () => { savedTrips.splice(+b.dataset.deltrip!, 1); localStorage.setItem('evp.trips.v1', JSON.stringify(savedTrips)); renderPlaces(); }));
+  $('#clearRecents')?.addEventListener('click', (e) => { e.preventDefault(); recents = []; localStorage.removeItem('evp.recents.v1'); renderPlaces(); });
+}
+
+// Live re-plan: once a trip is planned, changing a battery target or planning setting replans it.
+let replanTimer = 0;
+function scheduleReplan() {
+  if (!document.body.dataset.planned) return;
+  clearTimeout(replanTimer);
+  replanTimer = window.setTimeout(() => runPlan(), 700);
+}
+['startSoC', 'arriveSoC', 'minSoC'].forEach((id) => $(`#${id}`).addEventListener('change', scheduleReplan));
 
 // ---------- Vehicle editor ----------
 function curveSvg(v: VehicleProfile): string {
@@ -377,7 +474,7 @@ function renderVehicle() {
   const v = vehicle();
   const t10 = (() => { let m = 0; for (let s = 10; s < 80; s += 0.5) m += (0.5 / 100) * v.usableKWh / Math.max(1, Math.min(chargePowerKW(v, s + 0.25), 350 * 0.95)) * 60; return m; })();
   $('#vehiclePane').innerHTML = `
-    <div class="card"><h3>Your car</h3><div class="vehicle-pick">${vehicles.map((x) => `<div class="vcard ${x.id === v.id ? 'sel' : ''}" data-id="${x.id}"><div><b>${esc(x.name)}</b><small>${esc(x.trim)}</small></div><small>${x.usableKWh} kWh</small></div>`).join('')}</div></div>
+    <div class="card"><h3>Your car</h3><div class="vehicle-pick">${vehicles.map((x) => `<div class="vcard ${x.id === v.id ? 'sel' : ''}" data-id="${x.id}"><div><b>${esc(x.name)}</b><small>${esc(x.trim)}</small></div><small>${esc(capacityText(x))}</small></div>`).join('')}</div></div>
     <div class="card"><h3>Charging curve</h3><div class="curve">${curveSvg(v)}</div>
       <p class="muted small">10→80% on a 350 kW charger: about ${Math.round(t10)} min</p>
       <table class="curve-table"><tbody>${v.curve.map((c, i) => `<tr><td><div class="unit"><input data-ci="${i}" data-k="soc" type="number" value="${c.soc}"><i>%</i></div></td><td><div class="unit"><input data-ci="${i}" data-k="kw" type="number" value="${c.kw}"><i>kW</i></div></td></tr>`).join('')}</tbody></table>
@@ -433,8 +530,13 @@ function renderSettings() {
       ${tog('teslaMember', 'Tesla Supercharging membership', 'Off: non-member price ($0.58/kWh est.)')}
       <div class="row2" style="margin-top:10px">
         <label class="field"><span>Route preference</span><select data-s="preference">${(Object.keys(PREFERENCES) as (keyof typeof PREFERENCES)[]).map((k) => `<option value="${k}" ${s.preference === k ? 'selected' : ''}>${PREFERENCES[k].title}</option>`).join('')}</select></label>
+        <label class="field"><span>Stops: <b id="stopsLabel">${stopsLabel(s.stopsBias)}</b></span><input data-s="stopsBias" type="range" min="0" max="1" step="0.05" value="${s.stopsBias}"><div class="addr" style="display:flex;justify-content:space-between"><span>Fewest stops</span><span>Fastest arrival</span></div></label>
+        <label class="field"><span>Max price (0 = off)</span><div class="unit"><input data-s="maxPricePerKWh" type="number" step="0.01" min="0" value="${s.maxPricePerKWh}"><i>$/kWh</i></div></label>
+        <label class="field"><span>Min charger speed (0 = off)</span><div class="unit"><input data-s="minKW" type="number" step="25" min="0" value="${s.minKW}"><i>kW</i></div></label>
         <label class="field"><span>Charger corridor</span><div class="unit"><input data-s="corridorMiles" type="number" step="0.5" value="${s.corridorMiles}"><i>mi</i></div></label>
       </div>
+      <div class="field"><span>Networks (none checked = all)</span><div class="chips">${KNOWN_NETWORKS.map((n) => `<label class="chip"><input type="checkbox" data-net="${esc(n)}" ${s.networks.includes(n) ? 'checked' : ''}> ${esc(n)}</label>`).join('')}</div></div>
+      <p class="muted small">If no route fits the price, speed or network limits, they're relaxed one at a time and the trip says what changed.</p>
       <label class="field"><span>DCFC Tracker price proxy URL (optional)</span><input data-s="dcfcProxyUrl" type="url" placeholder="https://your-proxy.example.com" value="${esc(s.dcfcProxyUrl)}"></label>
     </div>
     <div class="card settings"><h3>Units</h3>
@@ -456,11 +558,19 @@ function renderSettings() {
   $$<HTMLInputElement>('#settingsPane [data-s]').forEach((el) => el.addEventListener('change', () => {
     const k = el.dataset.s as keyof Settings;
     const cur = DEFAULTS[k];
-    (settings as any)[k] = typeof cur === 'boolean' ? el.checked : typeof cur === 'number' ? parseFloat(el.value) || cur : el.value.trim();
+    (settings as any)[k] = typeof cur === 'boolean' ? el.checked : typeof cur === 'number' ? (Number.isFinite(parseFloat(el.value)) ? parseFloat(el.value) : cur) : el.value.trim();
+    if (k === 'stopsBias') $('#stopsLabel').textContent = stopsLabel(settings.stopsBias);
     if (k === 'nrelKey' && !settings.nrelKey) settings.nrelKey = 'DEMO_KEY';
     saveSettings(settings);
     if (k === 'colorBy' && lastPlan) drawPlan(lastPlan);
     if (['useMiles', 'temperatureUnit', 'efficiencyUnit'].includes(k)) rerender();
+    else if (!['colorBy', 'navApp', 'nrelKey'].includes(k)) scheduleReplan();
+  }));
+  $$<HTMLInputElement>('#settingsPane [data-net]').forEach((el) => el.addEventListener('change', () => {
+    const n = el.dataset.net!;
+    settings.networks = el.checked ? [...new Set([...settings.networks, n])] : settings.networks.filter((x) => x !== n);
+    saveSettings(settings);
+    scheduleReplan();
   }));
   $('#resetSettings').addEventListener('click', () => { settings = { ...DEFAULTS }; saveSettings(settings); renderSettings(); });
 }
@@ -469,7 +579,10 @@ function updateLabel() { const v = vehicle(); $('#vehicleLabel').textContent = `
 updateLabel();
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
-if (new URLSearchParams(location.search).has('demo')) runPlan();
+renderPlaces();
+const shared = decodeTrip(location.hash);
+if (shared) loadTrip(shared);
+else if (new URLSearchParams(location.search).has('demo')) runPlan();
 
 
 declare const __APP_VERSION__: string;

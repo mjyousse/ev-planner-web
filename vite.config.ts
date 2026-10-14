@@ -4,6 +4,6 @@ import pkg from './package.json';
 export default defineConfig({
   base: './',
   define: { __APP_VERSION__: JSON.stringify(pkg.version) },
-  build: { outDir: 'dist', chunkSizeWarningLimit: 1200 },
+  build: { outDir: 'dist', chunkSizeWarningLimit: 1200, rollupOptions: { output: { manualChunks: { maplibre: ['maplibre-gl'] } } } },
   test: { environment: 'node' },
 } as any);

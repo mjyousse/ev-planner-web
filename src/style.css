@@ -106,3 +106,9 @@ h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: v
   .legend { bottom: auto; top: calc(env(safe-area-inset-top) + 10px); right: 10px; }
   .maplibregl-ctrl-top-right { top: env(safe-area-inset-top); }
 }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; padding: 4px 8px; border: 1px solid rgba(127,127,127,.3); border-radius: 999px; }
+#places { margin: 6px 0; }
+#places button.small { margin: 2px 4px 2px 0; }
+.elev { margin-top: 10px; }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { arrivalBand, arrivalRange, costLines, efficiency, fmtEfficiency, fmtTemp, nextEfficiency, pickRoute, rangeText, EFFICIENCY_UNITS, type RouteSummary } from '../src/engine/insights';
+import { arrivalBand, arrivalRange, costLines, efficiency, fmtEfficiency, fmtTemp, nextEfficiency, pickRoute, rangeText, normalizePreference, stopPenaltyMinutes, stopsLabel, EFFICIENCY_UNITS, type RouteSummary } from '../src/engine/insights';
 import { parseRoutes } from '../src/services/routing';
 import { totalKm } from '../src/engine/geo';
 
@@ -32,9 +32,12 @@ describe('insights', () => {
 
   it('picks the route that matches the preference', () => {
     expect(pickRoute(options, 'fastest')?.index).toBe(0);
-    expect(pickRoute(options, 'cheapest')?.index).toBe(1);
     expect(pickRoute(options, 'efficient')?.index).toBe(1);
-    expect(pickRoute(options, 'balanced')?.index).toBe(1);
+    expect(normalizePreference('cheapest')).toBe('fastest');
+    expect(normalizePreference('efficient')).toBe('efficient');
+    expect(stopPenaltyMinutes(1)).toBe(0);
+    expect(stopPenaltyMinutes(0)).toBe(45);
+    expect(stopsLabel(0)).toBe('Fewest stops');
     expect(pickRoute([], 'fastest')).toBeUndefined();
   });
 

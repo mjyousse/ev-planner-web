@@ -29,22 +29,28 @@ export function fmtEfficiency(u: EfficiencyUnit, kWh: number, km: number): strin
 
 export const nextEfficiency = (u: EfficiencyUnit) => EFFICIENCY_UNITS[(EFFICIENCY_UNITS.indexOf(u) + 1) % EFFICIENCY_UNITS.length];
 
-export type RoutePreference = 'fastest' | 'balanced' | 'cheapest' | 'efficient';
+export type RoutePreference = 'fastest' | 'efficient';
 export const PREFERENCES: Record<RoutePreference, { title: string; detail: string; valueOfTime: number }> = {
-  fastest: { title: 'Fastest', detail: 'Shortest total time, even if charging costs more.', valueOfTime: 150 },
-  balanced: { title: 'Balanced', detail: 'Trades a few minutes for noticeably cheaper charging.', valueOfTime: 25 },
-  cheapest: { title: 'Cheapest', detail: 'Lowest charging cost, even if it takes longer.', valueOfTime: 4 },
-  efficient: { title: 'Most efficient', detail: 'Route that uses the least energy after hills, wind, temperature and speed.', valueOfTime: 25 },
+  fastest: { title: 'Fastest arrival', detail: 'Quickest total trip. Use the stops slider to trade a few minutes for fewer stops.', valueOfTime: 60 },
+  efficient: { title: 'Most efficient', detail: 'Route that uses the least energy after hills, wind, temperature and speed.', valueOfTime: 60 },
 };
+export const normalizePreference = (p: string): RoutePreference => (p === 'efficient' ? 'efficient' : 'fastest');
+
+/** ABRP-style stops slider: 0 = fewest stops (longer charges), 1 = more stops (shorter charges, fastest arrival). */
+export const stopPenaltyMinutes = (bias: number) => (1 - Math.min(Math.max(bias, 0), 1)) * 45;
+export function stopsLabel(bias: number): string {
+  if (bias < 0.2) return 'Fewest stops';
+  if (bias < 0.45) return 'Fewer stops';
+  if (bias < 0.7) return 'Balanced';
+  if (bias < 0.9) return 'Shorter charges';
+  return 'Fastest arrival';
+}
 
 export interface RouteSummary { index: number; name: string; km: number; totalMinutes: number; cost: number; energyKWh: number; arrivalSoC: number; stops: number }
 
-export function pickRoute(options: RouteSummary[], pref: RoutePreference): RouteSummary | undefined {
+export function pickRoute(options: RouteSummary[], pref: RoutePreference, stopPenalty = 0): RouteSummary | undefined {
   const key: (o: RouteSummary) => [number, number] =
-    pref === 'fastest' ? (o) => [o.totalMinutes, o.cost]
-      : pref === 'cheapest' ? (o) => [o.cost, o.totalMinutes]
-        : pref === 'efficient' ? (o) => [o.energyKWh, o.totalMinutes]
-          : (o) => [o.totalMinutes + (o.cost / PREFERENCES.balanced.valueOfTime) * 60, 0];
+    pref === 'efficient' ? (o) => [o.energyKWh, o.totalMinutes] : (o) => [o.totalMinutes + o.stops * stopPenalty, o.cost];
   return options.reduce<RouteSummary | undefined>((best, o) => {
     if (!best) return o;
     const a = key(o), b = key(best);
