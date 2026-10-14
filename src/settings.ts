@@ -1,3 +1,4 @@
+import type { EfficiencyUnit, RoutePreference, TemperatureUnit } from './engine/insights';
 import { BUILT_INS, EV9_GTLINE, type VehicleProfile } from './engine/vehicles';
 
 export interface Settings {
@@ -10,7 +11,10 @@ export interface Settings {
   maxSpeedMph: number;
   speedFactor: number;
   correction: number;
-  valueOfTime: number;
+  preference: RoutePreference;
+  useMiles: boolean;
+  temperatureUnit: TemperatureUnit;
+  efficiencyUnit: EfficiencyUnit;
   corridorMiles: number;
   colorBy: 'consumption' | 'speed';
   navApp: 'ask' | 'apple' | 'google';
@@ -20,7 +24,7 @@ export interface Settings {
 
 export const DEFAULTS: Settings = {
   nrelKey: 'DEMO_KEY', teslaMember: false, useWeather: true, useSpeedLimits: true, useElevation: true,
-  referenceSpeedMph: 62, maxSpeedMph: 80, speedFactor: 1, correction: 1, valueOfTime: 25, corridorMiles: 2,
+  referenceSpeedMph: 62, maxSpeedMph: 80, speedFactor: 1, correction: 1, preference: 'fastest', useMiles: true, temperatureUnit: 'F', efficiencyUnit: 'miPerKWh', corridorMiles: 2,
   colorBy: 'consumption', navApp: 'ask', dcfcProxyUrl: '', vehicleId: EV9_GTLINE.id,
 };
 

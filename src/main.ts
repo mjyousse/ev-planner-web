@@ -5,12 +5,13 @@ import type { LatLon } from './engine/geo';
 import { plan, type TripPlan } from './engine/planner';
 import { DCFCTrackerProxyPricingProvider, EstimatePricingProvider, FeedPricingProvider, LayeredPricingProvider, ListingPricingProvider, feesText, fmtFeedTime, freshnessLine, lastFeedGeneratedAt, loadFeed, rateText, type Charger } from './engine/pricing';
 import { chargePowerKW, type VehicleProfile } from './engine/vehicles';
-import { esc, fmtClock, fmtDuration, fmtF, fmtMi, fmtMoney, fmtMph, fmtPct, fmtWind, mi } from './format';
+import { esc, fmtClock, fmtDuration, fmtMi, fmtMoney, fmtMph, fmtPct, fmtWind, mi } from './format';
 import { addElevation } from './services/elevation';
 import { searchPlaces, type Place } from './services/geocode';
 import { appleMapsUrl, googleMapsUrl, googleTripUrl } from './services/links';
 import { fetchChargers } from './services/nrel';
-import { fetchRoute } from './services/routing';
+import { fetchRoutes, type RouteCandidate } from './services/routing';
+import { arrivalBand, arrivalRange, costLines, fmtEfficiency, fmtTemp, nextEfficiency, pickRoute, PREFERENCES, rangeText, EFFICIENCY_UNITS, EFFICIENCY_LABEL, type RouteSummary } from './engine/insights';
 import { addSpeedLimits } from './services/speedlimits';
 import { addWeather } from './services/weather';
 import { DEFAULTS, loadSettings, loadVehicles, saveSettings, saveVehicles, type Settings } from './settings';
@@ -36,6 +37,15 @@ map.addControl(new maplibregl.GeolocateControl({ positionOptions: { enableHighAc
 let markers: Marker[] = [];
 let lastPlan: TripPlan | undefined;
 let lastChargers: Charger[] = [];
+interface RouteOption { index: number; name: string; plan: TripPlan; chargers: Charger[] }
+let routeOptions: RouteOption[] = [];
+let selectedRoute = 0;
+let lastPlaces: { from: Place; to: Place } | undefined;
+let showCost = false;
+const summaryOf = (o: RouteOption): RouteSummary => ({ index: o.index, name: o.name, km: o.plan.totalKm, totalMinutes: o.plan.totalMinutes, cost: o.plan.totalCost, energyKWh: o.plan.totalKWh, arrivalSoC: o.plan.arrivalSoC, stops: o.plan.stops.length });
+const dist = (km: number) => (settings.useMiles ? fmtMi(km) : `${Math.round(km)} km`);
+const speedText = (kmh: number) => (settings.useMiles ? fmtMph(kmh) : `${Math.round(kmh)} km/h`);
+const tempText = (c?: number) => fmtTemp(c, settings.temperatureUnit);
 const legend = document.createElement('div');
 legend.className = 'legend';
 document.body.append(legend);
@@ -199,45 +209,23 @@ async function runPlan() {
     setStatus('Finding places…', 'busy');
     const [from, to] = await Promise.all([resolve('from'), resolve('to')]);
     setStatus('Routing…', 'busy');
-    let route = await fetchRoute(from, to);
-    setStatus('Adding terrain, weather and speed limits…', 'busy');
-    const [elev, wx, lim] = await Promise.all([
-      settings.useElevation ? addElevation(route) : Promise.resolve(route),
-      settings.useWeather ? addWeather(route) : Promise.resolve(route),
-      settings.useSpeedLimits ? addSpeedLimits(route) : Promise.resolve(route),
-    ]);
-    route = {
-      ...route,
-      points: route.points.map((p, i) => ({ ...p, elevationM: elev.points[i].elevationM, windMs: wx.points[i].windMs, windFromDeg: wx.points[i].windFromDeg, temperatureC: wx.points[i].temperatureC, speedLimitKmh: lim.points[i].speedLimitKmh })),
-      hasElevation: elev.hasElevation, hasWeather: wx.hasWeather, hasSpeedLimits: lim.hasSpeedLimits,
-    };
-    setStatus('Finding DC fast chargers…', 'busy');
-    const found = await fetchChargers(route, settings.nrelKey || 'DEMO_KEY', settings.corridorMiles);
-    setStatus('Checking prices…', 'busy');
-    const feed = await loadFeed(found.map((c) => c.state ?? ''));
-    found.forEach((c) => (c.openToNonTesla = feed.get(c.id)?.open_to_non_tesla));
-    // Tesla-only Superchargers can't charge non-Tesla cars, so leave them out.
-    const chargers = found.filter((c) => c.openToNonTesla !== false);
-    const pricing = new LayeredPricingProvider([
-      new FeedPricingProvider(feed, settings.teslaMember),
-      new DCFCTrackerProxyPricingProvider(settings.dcfcProxyUrl || undefined),
-      new ListingPricingProvider(settings.teslaMember),
-      new EstimatePricingProvider(settings.teslaMember),
-    ]);
-    const prices = await pricing.prices(chargers);
-    chargers.forEach((c) => (c.price = prices.get(c.id)));
-    lastChargers = chargers;
-    setStatus('Planning stops…', 'busy');
-    await new Promise((r) => setTimeout(r, 0));
-    const p = plan({
-      route, chargers, model: model(), startSoC: num('startSoC'), targetArrivalSoC: num('arriveSoC'), minChargerArrivalSoC: num('minSoC'),
-      valueOfTimePerHour: settings.valueOfTime, teslaMember: settings.teslaMember,
-    });
-    lastPlan = p;
-    const notes = [!route.hasWeather && settings.useWeather ? 'weather' : '', !route.hasSpeedLimits && settings.useSpeedLimits ? 'speed limits' : '', !route.hasElevation && settings.useElevation ? 'elevation' : ''].filter(Boolean);
-    setStatus(notes.length ? `Planned without ${notes.join(', ')} (service unavailable). ${chargers.length} chargers found.` : `${chargers.length} DC fast chargers along the route.`);
-    renderPlan(p, from, to);
-    drawPlan(p);
+    const candidates = (await fetchRoutes(from, to)).slice(0, 3);
+    const options: RouteOption[] = [];
+    let firstError: unknown;
+    let notes: string[] = [];
+    for (const [i, cand] of candidates.entries()) {
+      try {
+        const r = await planRoute(cand, candidates.length > 1 ? ` (route ${i + 1} of ${candidates.length})` : '');
+        options.push({ index: i, name: cand.name, plan: r.plan, chargers: r.chargers });
+        if (i === 0) notes = r.notes;
+      } catch (e) { firstError ??= e; }
+    }
+    if (!options.length) throw firstError ?? new Error('Could not plan this trip.');
+    routeOptions = options;
+    lastPlaces = { from, to };
+    const best = pickRoute(options.map(summaryOf), settings.preference)?.index ?? options[0].index;
+    setStatus(notes.length ? `Planned without ${notes.join(', ')} (service unavailable).` : `${options.length} route${options.length > 1 ? 's' : ''} planned.`);
+    selectRoute(best);
     document.body.dataset.planned = '1';
   } catch (e) {
     setStatus((e as Error).message || 'Something went wrong.', 'error');
@@ -247,6 +235,56 @@ async function runPlan() {
 }
 $('#planBtn').addEventListener('click', runPlan);
 
+async function planRoute(cand: RouteCandidate, label: string): Promise<{ plan: TripPlan; chargers: Charger[]; notes: string[] }> {
+  let route = cand.route;
+  setStatus(`Adding terrain, weather and speed limits${label}…`, 'busy');
+  const [elev, wx, lim] = await Promise.all([
+    settings.useElevation ? addElevation(route) : Promise.resolve(route),
+    settings.useWeather ? addWeather(route) : Promise.resolve(route),
+    settings.useSpeedLimits ? addSpeedLimits(route) : Promise.resolve(route),
+  ]);
+  route = {
+    ...route,
+    points: route.points.map((p, i) => ({ ...p, elevationM: elev.points[i].elevationM, windMs: wx.points[i].windMs, windFromDeg: wx.points[i].windFromDeg, temperatureC: wx.points[i].temperatureC, speedLimitKmh: lim.points[i].speedLimitKmh })),
+    hasElevation: elev.hasElevation, hasWeather: wx.hasWeather, hasSpeedLimits: lim.hasSpeedLimits,
+  };
+  setStatus(`Finding DC fast chargers${label}…`, 'busy');
+  const found = await fetchChargers(route, settings.nrelKey || 'DEMO_KEY', settings.corridorMiles);
+  setStatus(`Checking prices${label}…`, 'busy');
+  const feed = await loadFeed(found.map((c) => c.state ?? ''));
+  found.forEach((c) => (c.openToNonTesla = feed.get(c.id)?.open_to_non_tesla));
+  // Tesla-only Superchargers can't charge non-Tesla cars, so leave them out.
+  const chargers = found.filter((c) => c.openToNonTesla !== false);
+  const pricing = new LayeredPricingProvider([
+    new FeedPricingProvider(feed, settings.teslaMember),
+    new DCFCTrackerProxyPricingProvider(settings.dcfcProxyUrl || undefined),
+    new ListingPricingProvider(settings.teslaMember),
+    new EstimatePricingProvider(settings.teslaMember),
+  ]);
+  const prices = await pricing.prices(chargers);
+  chargers.forEach((c) => (c.price = prices.get(c.id)));
+  setStatus(`Planning stops${label}…`, 'busy');
+  await new Promise((r) => setTimeout(r, 0));
+  const p = plan({
+    route, chargers, model: model(), startSoC: num('startSoC'), targetArrivalSoC: num('arriveSoC'), minChargerArrivalSoC: num('minSoC'),
+    valueOfTimePerHour: PREFERENCES[settings.preference].valueOfTime, teslaMember: settings.teslaMember,
+  });
+  const notes = [!route.hasWeather && settings.useWeather ? 'weather' : '', !route.hasSpeedLimits && settings.useSpeedLimits ? 'speed limits' : '', !route.hasElevation && settings.useElevation ? 'elevation' : ''].filter(Boolean);
+  return { plan: p, chargers, notes };
+}
+
+function selectRoute(index: number) {
+  const o = routeOptions.find((r) => r.index === index);
+  if (!o || !lastPlaces) return;
+  selectedRoute = index;
+  lastPlan = o.plan;
+  lastChargers = o.chargers;
+  renderPlan(o.plan, lastPlaces.from, lastPlaces.to);
+  drawPlan(o.plan);
+}
+
+function rerender() { if (lastPlan && lastPlaces) renderPlan(lastPlan, lastPlaces.from, lastPlaces.to); }
+
 function navButtons(to: LatLon, name: string): string {
   const a = `<a class="ghost" target="_blank" rel="noopener" href="${appleMapsUrl(to, name)}"> Apple Maps</a>`;
   const g = `<a class="ghost" target="_blank" rel="noopener" href="${googleMapsUrl(to)}">Google Maps</a>`;
@@ -254,8 +292,8 @@ function navButtons(to: LatLon, name: string): string {
 }
 
 function legLine(w: ReturnType<TripPlan['energy']['weather']> | undefined, speed: number, km: number, minutes: number): string {
-  const parts = [`${fmtMi(km)}`, fmtDuration(minutes), `avg ${fmtMph(speed)}`];
-  if (w) parts.push(fmtWind(w.headwindMs), fmtF(w.temperatureC), `${weatherPercent(w) >= 0 ? '+' : ''}${Math.round(weatherPercent(w))}% energy`);
+  const parts = [dist(km), fmtDuration(minutes), `avg ${speedText(speed)}`];
+  if (w) parts.push(fmtWind(w.headwindMs), tempText(w.temperatureC), `${weatherPercent(w) >= 0 ? '+' : ''}${Math.round(weatherPercent(w))}% energy`);
   return `<div class="leg">${parts.map((x) => `<span>${esc(x)}</span>`).join('<span>·</span>')}</div>`;
 }
 
@@ -264,18 +302,21 @@ function renderPlan(p: TripPlan, from: Place, to: Place) {
   let clock = depart.getTime();
   const w = p.weather;
   const wxLine = w
-    ? `<div class="wx"><span>🌬 ${fmtWind(w.headwindMs)}</span><span>🌡 ${fmtF(w.temperatureC)}</span><span>${weatherPercent(w) >= 0 ? '+' : ''}${Math.round(weatherPercent(w))}% energy from weather</span></div>`
+    ? `<div class="wx"><span>🌬 ${fmtWind(w.headwindMs)}</span><span>🌡 ${tempText(w.temperatureC)}</span><span>${weatherPercent(w) >= 0 ? '+' : ''}${Math.round(weatherPercent(w))}% energy from weather</span></div>`
     : `<div class="wx"><span>Weather off or unavailable</span></div>`;
   const tripUrl = googleTripUrl(from, to, p.stops.map((s) => s.charger));
   let html = `<div class="card">
     <div class="summary">
       <div class="metric"><span>Total</span><b>${fmtDuration(p.totalMinutes)}</b></div>
       <div class="metric"><span>Charging</span><b>${fmtDuration(p.chargeMinutes)}</b></div>
-      <div class="metric"><span>Cost</span><b>${fmtMoney(p.totalCost)}</b></div>
-      <div class="metric"><span>Distance</span><b>${fmtMi(p.totalKm)}</b></div>
-      <div class="metric"><span>Stops</span><b>${p.stops.length}</b></div>
-      <div class="metric"><span>Arrive</span><b>${fmtPct(p.arrivalSoC)}</b></div>
+      <div class="metric" id="costMetric" style="cursor:pointer" title="How cost is calculated"><span>Cost ⓘ</span><b>${fmtMoney(p.totalCost)}</b></div>
+      <div class="metric"><span>Distance</span><b>${dist(p.totalKm)}</b></div>
+      <div class="metric" id="effMetric" style="cursor:pointer" title="Tap to change units"><span>Avg energy ⇄</span><b>${fmtEfficiency(settings.efficiencyUnit, p.totalKWh, p.totalKm)}</b></div>
+      <div class="metric"><span>Arrive</span><b>${rangeText(routeOptions.length > 1 ? arrivalRange(routeOptions.map(summaryOf))! : arrivalBand(p.arrivalSoC, p.energy.kWh(p.stops.at(-1)?.routeKm ?? 0, p.totalKm), vehicle().usableKWh))}</b></div>
     </div>
+    ${routeOptions.length > 1 ? `<div class="routes">${routeOptions.map((o) => { const r = summaryOf(o); return `<label class="toggle" style="cursor:pointer"><div>${o.name ? 'via ' + esc(o.name) : 'Route ' + (o.index + 1)}<small>${fmtDuration(r.totalMinutes)} · ${dist(r.km)} · ${fmtMoney(r.cost)} · ${Math.round(r.energyKWh)} kWh · arrive ${fmtPct(r.arrivalSoC)}</small></div><input type="radio" name="route" data-route="${o.index}" ${o.index === selectedRoute ? 'checked' : ''}></label>`; }).join('')}</div>` : ''}
+    ${showCost ? `<div class="costinfo"><p class="muted small">Each stop's cost is the energy the charger delivers times its price. About 8% is lost as heat, so you pay for a little more than the battery gains. Some networks add session or per-minute fees.</p>${p.stops.map((s, i) => `<div><b>${i + 1}. ${esc(s.charger.name)}</b>${costLines(s.energyKWh, 0.92, s.pricePerKWh, s.cost).map((l) => `<div class="addr">${esc(l)}</div>`).join('')}</div>`).join('') || '<div class="addr">No charging needed.</div>'}</div>` : ''}
+    <p class="muted small">Arrive shows the spread across routes, or ±10% energy with one route. OSRM routing has no live traffic.</p>
     ${wxLine}
     ${lastFeedGeneratedAt() ? `<div class="addr">Data refreshed ${esc(fmtFeedTime(lastFeedGeneratedAt())!)}</div>` : ''}
     <div class="cta"><a class="primary" id="startTrip" target="_blank" rel="noopener" href="${tripUrl}">Start trip in Google Maps</a></div>
@@ -313,6 +354,9 @@ function renderPlan(p: TripPlan, from: Place, to: Place) {
     <h4>${esc(to.name)}</h4><div class="addr">Arrive ${fmtClock(new Date(clock))} · ${fmtPct(p.arrivalSoC)}</div>
     <div class="btns" style="margin-top:6px">${navButtons(to, to.name)}</div></div></div></div>`;
   $('#result').innerHTML = html;
+  $('#effMetric')?.addEventListener('click', () => { settings.efficiencyUnit = nextEfficiency(settings.efficiencyUnit); saveSettings(settings); rerender(); });
+  $('#costMetric')?.addEventListener('click', () => { showCost = !showCost; rerender(); });
+  $$<HTMLInputElement>('[data-route]').forEach((el) => el.addEventListener('change', () => selectRoute(Number(el.dataset.route))));
 }
 
 // ---------- Vehicle editor ----------
@@ -388,10 +432,17 @@ function renderSettings() {
     <div class="card settings"><h3>Charging &amp; price</h3>
       ${tog('teslaMember', 'Tesla Supercharging membership', 'Off: non-member price ($0.58/kWh est.)')}
       <div class="row2" style="margin-top:10px">
-        <label class="field"><span>Value of your time</span><div class="unit"><input data-s="valueOfTime" type="number" value="${s.valueOfTime}"><i>$/h</i></div></label>
+        <label class="field"><span>Route preference</span><select data-s="preference">${(Object.keys(PREFERENCES) as (keyof typeof PREFERENCES)[]).map((k) => `<option value="${k}" ${s.preference === k ? 'selected' : ''}>${PREFERENCES[k].title}</option>`).join('')}</select></label>
         <label class="field"><span>Charger corridor</span><div class="unit"><input data-s="corridorMiles" type="number" step="0.5" value="${s.corridorMiles}"><i>mi</i></div></label>
       </div>
       <label class="field"><span>DCFC Tracker price proxy URL (optional)</span><input data-s="dcfcProxyUrl" type="url" placeholder="https://your-proxy.example.com" value="${esc(s.dcfcProxyUrl)}"></label>
+    </div>
+    <div class="card settings"><h3>Units</h3>
+      ${tog('useMiles', 'Miles', 'Off: kilometers')}
+      <div class="row2" style="margin-top:10px">
+        <label class="field"><span>Temperature</span><select data-s="temperatureUnit"><option value="F" ${s.temperatureUnit === 'F' ? 'selected' : ''}>Fahrenheit</option><option value="C" ${s.temperatureUnit === 'C' ? 'selected' : ''}>Celsius</option></select></label>
+        <label class="field"><span>Energy use</span><select data-s="efficiencyUnit">${EFFICIENCY_UNITS.map((u) => `<option value="${u}" ${s.efficiencyUnit === u ? 'selected' : ''}>${EFFICIENCY_LABEL[u]}</option>`).join('')}</select></label>
+      </div>
     </div>
     <div class="card settings"><h3>Map &amp; navigation</h3>
       <label class="field"><span>Color route by</span><select data-s="colorBy"><option value="consumption" ${s.colorBy === 'consumption' ? 'selected' : ''}>Consumption</option><option value="speed" ${s.colorBy === 'speed' ? 'selected' : ''}>Speed</option></select></label>
@@ -409,6 +460,7 @@ function renderSettings() {
     if (k === 'nrelKey' && !settings.nrelKey) settings.nrelKey = 'DEMO_KEY';
     saveSettings(settings);
     if (k === 'colorBy' && lastPlan) drawPlan(lastPlan);
+    if (['useMiles', 'temperatureUnit', 'efficiencyUnit'].includes(k)) rerender();
   }));
   $('#resetSettings').addEventListener('click', () => { settings = { ...DEFAULTS }; saveSettings(settings); renderSettings(); });
 }
