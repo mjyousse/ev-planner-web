@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <link rel="preconnect" href="https://router.project-osrm.org" crossorigin />
+    <link rel="preconnect" href="https://photon.komoot.io" crossorigin />
+    <link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin />
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>EV Planner</title>
+  <meta name="description" content="EV road-trip planner with charging stops, weather, speed limits and price estimates." />
+  <meta name="theme-color" content="#0b1220" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#f5f7fb" media="(prefers-color-scheme: light)" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="EV Planner" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" type="image/png" href="icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+  <script type="module" crossorigin src="./assets/index-CC_0F6wD.js"></script>
+  <link rel="modulepreload" crossorigin href="./assets/maplibre-D6KsYbmY.js">
+  <link rel="stylesheet" crossorigin href="./assets/index-C3GGX2Oo.css">
+</head>
+<body>
+  <div id="map"></div>
+  <aside id="panel" class="panel">
+    <div class="grabber" id="grabber"></div>
+    <header class="brand">
+      <div class="logo">⚡</div>
+      <div><h1>EV Planner</h1><p id="vehicleLabel" class="muted"></p></div>
+    </header>
+    <nav class="tabs" role="tablist">
+      <button data-tab="trip" class="active">Trip</button>
+      <button data-tab="vehicle">Vehicle</button>
+      <button data-tab="settings">Settings</button>
+      <button data-tab="about">About</button>
+    </nav>
+    <div class="scroll">
+      <section data-pane="trip" class="pane active">
+        <div class="card form">
+          <label class="field ac"><span>From</span><input id="from" autocomplete="off" placeholder="Start address or city" /><ul class="suggest"></ul></label>
+          <label class="field ac"><span>To</span><input id="to" autocomplete="off" placeholder="Destination" /><ul class="suggest"></ul></label>
+          <div id="places"></div>
+          <div class="row3">
+            <label class="field"><span>Start</span><div class="unit"><input id="startSoC" type="number" min="5" max="100" value="85" /><i>%</i></div></label>
+            <label class="field"><span>Arrive</span><div class="unit"><input id="arriveSoC" type="number" min="0" max="90" value="20" /><i>%</i></div></label>
+            <label class="field"><span>Min at charger</span><div class="unit"><input id="minSoC" type="number" min="0" max="50" value="10" /><i>%</i></div></label>
+          </div>
+          <button id="planBtn" class="primary">Plan trip</button>
+          <p class="poc">Proof of concept: consumption is modeled, not measured.</p>
+        </div>
+        <div id="status" class="status" hidden></div>
+        <div id="result"></div>
+      </section>
+      <section data-pane="vehicle" class="pane" id="vehiclePane"></section>
+      <section data-pane="settings" class="pane" id="settingsPane"></section>
+      <section data-pane="about" class="pane">
+        <div class="card about">
+          <div class="logo big">⚡</div>
+          <h2>EV Planner Web</h2>
+          <p>Version <span id="appVersion"></span> · Made by <strong>Mohammad Youssef</strong> · <a href="https://github.com/mjyousse" target="_blank" rel="noopener">github.com/mjyousse</a></p>
+          <p class="muted">A browser version of the EV Planner iPhone app. It plans DC fast-charging stops from a physics-based consumption model, your car's charging curve, terrain, forecast wind and temperature, and posted speed limits.</p>
+          <p class="poc">Proof of concept: consumption is modeled, not measured. Live OBD data is only in the iPhone app.</p>
+          <h3>Data sources</h3>
+          <ul class="sources">
+            <li>Chargers: NREL Alternative Fuels Data Center</li>
+            <li>Routing: OSRM · Search: Photon (OpenStreetMap)</li>
+            <li>Weather &amp; elevation: Open-Meteo</li>
+            <li>Speed limits: OpenStreetMap via Overpass</li>
+            <li>Map: OpenFreeMap · © OpenStreetMap contributors</li>
+          </ul>
+          <p class="muted small">Prices are estimates by network (guest / non-member rates) unless a station lists its own price. Always confirm in the network's app.</p>
+        </div>
+      </section>
+    </div>
+  </aside>
+</body>
+</html>
